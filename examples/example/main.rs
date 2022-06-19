@@ -9,11 +9,12 @@ use std::{collections::HashSet, u64};
 
 use anyhow::Result;
 use ash::extensions::ext::DebugUtils;
-use ash::extensions::khr::{Surface, Swapchain};
+use ash::extensions::khr::{Surface, Swapchain, Synchronization2};
 use ash::{vk, Device, Entry, Instance};
 use ash_window::{create_surface, enumerate_required_extensions};
 use cgmath::{Deg, Matrix4, Point3, Vector3};
 use crevice::std140::{AsStd140, Std140};
+use egui::TextBuffer;
 use gpu_allocator::vulkan::*;
 use memoffset::offset_of;
 #[cfg(debug_assertions)]
@@ -29,7 +30,7 @@ const ENABLE_VALIDATION_LAYERS: bool = true;
 const ENABLE_VALIDATION_LAYERS: bool = false;
 const VALIDATION: &[&str] = &["VK_LAYER_KHRONOS_validation"];
 
-const DEVICE_EXTENSIONS: &[&str] = &["VK_KHR_swapchain"];
+const DEVICE_EXTENSIONS: &[&str] = &["VK_KHR_swapchain", "VK_KHR_synchronization2"];
 
 const VERTEX_SHADER_PASS: &'static str = "examples/example/shaders/spv/vert.spv";
 const FRAGMENT_SHADER_PASS: &'static str = "examples/example/shaders/spv/frag.spv";
@@ -215,7 +216,7 @@ impl App {
             let app_name = CString::new(title)?;
             let engine_name = CString::new("Vulkan Engine")?;
             let app_info = vk::ApplicationInfo::builder()
-                .api_version(vk::make_api_version(0, 1, 2, 0))
+                .api_version(vk::make_api_version(0, 1, 3, 0))
                 .application_version(vk::make_api_version(0, 0, 1, 0))
                 .application_name(&app_name)
                 .engine_version(vk::make_api_version(0, 0, 1, 0))
@@ -225,21 +226,24 @@ impl App {
             let extension_names = enumerate_required_extensions(&window)?;
             let mut extension_names = extension_names
                 .iter()
-                .map(|name| name.as_ptr())
+                .map(|name| *name)
                 .collect::<Vec<_>>();
+            
             if ENABLE_VALIDATION_LAYERS {
                 extension_names.push(DebugUtils::name().as_ptr());
             }
-
+            
             // layer for validation
             let enabled_layer_names = VALIDATION
                 .iter()
                 .map(|layer_name| CString::new(*layer_name).unwrap())
                 .collect::<Vec<_>>();
-            let enabled_layer_names = enabled_layer_names
+            let mut enabled_layer_names = enabled_layer_names
                 .iter()
                 .map(|layer_name| layer_name.as_ptr())
                 .collect::<Vec<_>>();
+            
+            enabled_layer_names.push("VK_LAYER_KHRONOS_synchronization2".as_ptr() as _);
 
             // instance create info
             let create_info = vk::InstanceCreateInfo::builder()
@@ -417,11 +421,14 @@ impl App {
                 queue_create_infos.push(queue_create_info);
             }
 
-            let enabled_extension_names = [Swapchain::name().as_ptr()];
-
+            let enabled_extension_names = [Swapchain::name().as_ptr(), Synchronization2::name().as_ptr()];
+            let mut features = vk::PhysicalDeviceVulkan13Features::builder().synchronization2(true).build();
+            let mut vk13features = vk::PhysicalDeviceFeatures2::builder().push_next::<vk::PhysicalDeviceVulkan13Features>(&mut features);
+            
             let device_create_info = vk::DeviceCreateInfo::builder()
                 .queue_create_infos(queue_create_infos.as_slice())
-                .enabled_extension_names(&enabled_extension_names);
+                .enabled_extension_names(&enabled_extension_names)
+                .push_next(&mut vk13features);
 
             unsafe { instance.create_device(physical_device, &device_create_info, None)? }
         };
@@ -1398,10 +1405,11 @@ impl App {
                     ui.separator();
                     ui.text_edit_singleline(&mut self.text);
                 });
-            let (_, shapes) = self.egui_integration.end_frame(&mut self.window);
+            let (_, textures_delta, shapes) = self.egui_integration.end_frame(&mut self.window);
             let clipped_meshes = self.egui_integration.context().tessellate(shapes);
+            
             self.egui_integration
-                .paint(command_buffer, image_index, clipped_meshes);
+                .paint(command_buffer, image_index, textures_delta, clipped_meshes);
             // #### egui ##########################################################################
 
             self.device.end_command_buffer(command_buffer)?;
